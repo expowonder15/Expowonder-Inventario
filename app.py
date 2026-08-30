@@ -1,0 +1,1535 @@
+import os
+import psycopg2
+from datetime import datetime, timedelta, timezone
+
+# ── Hora de Colombia (UTC-5) ───────────────────────────────────────────────
+# Render corre en otro huso horario. Sin esto, los registros hechos desde
+# la app quedarian con una hora distinta a los que hace el ERP.
+ZONA_COLOMBIA = timezone(timedelta(hours=-5))
+
+def ahora():
+    """Fecha y hora de Colombia, sin importar donde este el servidor."""
+    return datetime.now(ZONA_COLOMBIA)
+from flask import Flask, request, jsonify, render_template_string
+
+app = Flask(__name__)
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
+
+# ── Cuantos tallos trae un ramo ────────────────────────────────────────────
+TALLOS_POR_RAMO_DEFECTO = 10
+TALLOS_POR_RAMO_CATEGORIA = {
+    "rose": 25, "carnations": 25, "mini carnations": 25, "gerbera": 5,
+}
+TALLOS_POR_RAMO_PRODUCTO = {
+    "viburnum": 5, "sunflower": 5, "green ball": 5,
+}
+
+def _norm(t):
+    return " ".join(str(t or "").lower().strip().split())
+
+def tallos_por_ramo(nombre, categoria):
+    n = _norm(nombre)
+    if n in TALLOS_POR_RAMO_PRODUCTO:
+        return TALLOS_POR_RAMO_PRODUCTO[n]
+    return TALLOS_POR_RAMO_CATEGORIA.get(_norm(categoria), TALLOS_POR_RAMO_DEFECTO)
+
+
+def normalizar_stock(cursor, flor):
+    """
+    Recompone ramos y tallos para que se lean bien.
+
+    Al mezclar salidas en tallos (BQTs) con entradas en ramos, el stock
+    puede quedar como "1 ramo y -14 tallos", que es correcto pero confuso.
+    Esto lo convierte en "0 ramos y 11 tallos", que es lo mismo.
+    """
+    cursor.execute("""SELECT categoria, stock_ramos, stock_tallos
+                      FROM flores WHERE LOWER(nombre) = LOWER(%s)""", (flor,))
+    row = cursor.fetchone()
+    if not row:
+        return
+    categoria, ramos, tallos = row[0], row[1] or 0, row[2] or 0
+
+    # Si ya tienen el mismo signo (o alguno es cero), no hay nada que arreglar
+    if ramos == 0 or tallos == 0 or (ramos > 0) == (tallos > 0):
+        return
+
+    tpr = tallos_por_ramo(flor, categoria)
+    total = ramos * tpr + tallos
+    if total >= 0:
+        nuevos_r, nuevos_s = total // tpr, total % tpr
+    else:
+        falta = -total
+        nuevos_r, nuevos_s = -(falta // tpr), -(falta % tpr)
+
+    cursor.execute("""UPDATE flores SET stock_ramos = %s, stock_tallos = %s
+                      WHERE LOWER(nombre) = LOWER(%s)""", (nuevos_r, nuevos_s, flor))
+
+CATALOGO = [{"nombre": "Rose Alive", "categoria": "Rosa"}, {"nombre": "Rose Blue Berry", "categoria": "Rosa"}, {"nombre": "Rose Bi Color", "categoria": "Rosa"}, {"nombre": "Rose Blush", "categoria": "Rosa"}, {"nombre": "Rose Brighton", "categoria": "Rosa"}, {"nombre": "Rose Blessing", "categoria": "Rosa"}, {"nombre": "Rose Café Del Mar", "categoria": "Rosa"}, {"nombre": "Rose Cherry Brandy", "categoria": "Rosa"}, {"nombre": "Rose Cool Water", "categoria": "Rosa"}, {"nombre": "Rose Deep Silver", "categoria": "Rosa"}, {"nombre": "Rose Deep Purple", "categoria": "Rosa"}, {"nombre": "Rose Engagement", "categoria": "Rosa"}, {"nombre": "Rose Forever Young", "categoria": "Rosa"}, {"nombre": "Rose Freedom", "categoria": "Rosa"}, {"nombre": "Rose Friendship", "categoria": "Rosa"}, {"nombre": "Rose Garota", "categoria": "Rosa"}, {"nombre": "Rose Gold Fish", "categoria": "Rosa"}, {"nombre": "Rose Gold Star", "categoria": "Rosa"}, {"nombre": "Rose Green", "categoria": "Rosa"}, {"nombre": "Rose Hearts", "categoria": "Rosa"}, {"nombre": "Rose Hermosa", "categoria": "Rosa"}, {"nombre": "Rose High And Arena", "categoria": "Rosa"}, {"nombre": "Rose High And Bonita", "categoria": "Rosa"}, {"nombre": "Rose High And Blooming", "categoria": "Rosa"}, {"nombre": "Rose High And Magic", "categoria": "Rosa"}, {"nombre": "Rose Hilux", "categoria": "Rosa"}, {"nombre": "Rose Hot Pink", "categoria": "Rosa"}, {"nombre": "Rose Hot Princess", "categoria": "Rosa"}, {"nombre": "Rose Ivory", "categoria": "Rosa"}, {"nombre": "Rose Lavender", "categoria": "Rosa"}, {"nombre": "Rose Light Orlando", "categoria": "Rosa"}, {"nombre": "Rose Light Pink", "categoria": "Rosa"}, {"nombre": "Rose Lola", "categoria": "Rosa"}, {"nombre": "Rose Luciano", "categoria": "Rosa"}, {"nombre": "Rose Minion Yellow", "categoria": "Rosa"}, {"nombre": "Rose Mondial", "categoria": "Rosa"}, {"nombre": "Rose Movistar", "categoria": "Rosa"}, {"nombre": "Rose New Face", "categoria": "Rosa"}, {"nombre": "Rose New Flash", "categoria": "Rosa"}, {"nombre": "Rose Orange", "categoria": "Rosa"}, {"nombre": "Rose Orlando", "categoria": "Rosa"}, {"nombre": "Rose Peach", "categoria": "Rosa"}, {"nombre": "Rose Pink", "categoria": "Rosa"}, {"nombre": "Rose Pink Floyd", "categoria": "Rosa"}, {"nombre": "Rose Pink Mondial", "categoria": "Rosa"}, {"nombre": "Rose Playa Blanca", "categoria": "Rosa"}, {"nombre": "Rose Pleasure", "categoria": "Rosa"}, {"nombre": "Rose Polar Star", "categoria": "Rosa"}, {"nombre": "Rose Princess Crown", "categoria": "Rosa"}, {"nombre": "Rose Proud", "categoria": "Rosa"}, {"nombre": "Rose Purple", "categoria": "Rosa"}, {"nombre": "Rose Queens Crown", "categoria": "Rosa"}, {"nombre": "Rose Ragazza", "categoria": "Rosa"}, {"nombre": "Rose Red", "categoria": "Rosa"}, {"nombre": "Rose Shimmer", "categoria": "Rosa"}, {"nombre": "Rose Silantoy", "categoria": "Rosa"}, {"nombre": "Rose Skyline", "categoria": "Rosa"}, {"nombre": "Rose Soulmate", "categoria": "Rosa"}, {"nombre": "Rose Stardust", "categoria": "Rosa"}, {"nombre": "Rose Sugar Doll", "categoria": "Rosa"}, {"nombre": "Rose Sweet Unique", "categoria": "Rosa"}, {"nombre": "Rose Sweetness", "categoria": "Rosa"}, {"nombre": "Rose Tabata", "categoria": "Rosa"}, {"nombre": "Rose Tiffany", "categoria": "Rosa"}, {"nombre": "Rose V.P Pink", "categoria": "Rosa"}, {"nombre": "Rose Vendela", "categoria": "Rosa"}, {"nombre": "Rose White", "categoria": "Rosa"}, {"nombre": "Rose Yellow", "categoria": "Rosa"}, {"nombre": "Rose Spray Red", "categoria": "Rose Spray"}, {"nombre": "Rose Spray Hot Pink", "categoria": "Rose Spray"}, {"nombre": "Rose Spray Pink", "categoria": "Rose Spray"}, {"nombre": "Rose Spray White", "categoria": "Rose Spray"}, {"nombre": "Rose Spray Yellow", "categoria": "Rose Spray"}, {"nombre": "Alstroemeria Assorted", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Bi Color", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Creme", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Hot Pink", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Lavender", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Orange", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Pink", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Purple", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Red", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria White", "categoria": "Alstroemeria"}, {"nombre": "Alstroemeria Yellow", "categoria": "Alstroemeria"}, {"nombre": "Asiatic Lily Red", "categoria": "Lirio"}, {"nombre": "Asiatic Lily Orange", "categoria": "Lirio"}, {"nombre": "Asiatic Lily Pink", "categoria": "Lirio"}, {"nombre": "Asiatic Lily White", "categoria": "Lirio"}, {"nombre": "Asiatic Lily Yellow", "categoria": "Lirio"}, {"nombre": "Oriental Lily Red", "categoria": "Lirio"}, {"nombre": "Oriental Lily Orange", "categoria": "Lirio"}, {"nombre": "Oriental Lily Pink", "categoria": "Lirio"}, {"nombre": "Oriental Lily White", "categoria": "Lirio"}, {"nombre": "Oriental Lily Yellow", "categoria": "Lirio"}, {"nombre": "Calla Lily Pink", "categoria": "Calla"}, {"nombre": "Calla Lily White", "categoria": "Calla"}, {"nombre": "Button White", "categoria": "pompon"}, {"nombre": "Button Yellow", "categoria": "pompon"}, {"nombre": "Button Pink", "categoria": "pompon"}, {"nombre": "Button Hot Pink", "categoria": "pompon"}, {"nombre": "Button Lavender", "categoria": "pompon"}, {"nombre": "Button Orange", "categoria": "pompon"}, {"nombre": "Button Purple", "categoria": "pompon"}, {"nombre": "Button Novelty Light Bronze", "categoria": "pompon"}, {"nombre": "Button Dark Bronze", "categoria": "pompon"}, {"nombre": "Button Red", "categoria": "pompon"}, {"nombre": "Button  Green", "categoria": "pompon"}, {"nombre": "Novelty White", "categoria": "pompon"}, {"nombre": "Novelty Yellow", "categoria": "pompon"}, {"nombre": "Novelty Pink", "categoria": "pompon"}, {"nombre": "Novelty Hot Pink", "categoria": "pompon"}, {"nombre": "Novelty Lavender", "categoria": "pompon"}, {"nombre": "Novelty Orange", "categoria": "pompon"}, {"nombre": "Novelty Purple", "categoria": "pompon"}, {"nombre": "Novelty Light Bronze", "categoria": "pompon"}, {"nombre": "Novelty Dark Bronze", "categoria": "pompon"}, {"nombre": "Novelty Red", "categoria": "pompon"}, {"nombre": "Novelty Green", "categoria": "pompon"}, {"nombre": "Cushion White", "categoria": "pompon"}, {"nombre": "Cushion Yellow", "categoria": "pompon"}, {"nombre": "Cushion Pink", "categoria": "pompon"}, {"nombre": "Cushion Hot Pink", "categoria": "pompon"}, {"nombre": "Cushion Lavender", "categoria": "pompon"}, {"nombre": "Cushion Orange", "categoria": "pompon"}, {"nombre": "Cushion Purple", "categoria": "pompon"}, {"nombre": "Cushion Light Bronze", "categoria": "pompon"}, {"nombre": "Cushion Dark Bronze", "categoria": "pompon"}, {"nombre": "Cushion Red", "categoria": "pompon"}, {"nombre": "Cushion Green", "categoria": "pompon"}, {"nombre": "Daisy White", "categoria": "pompon"}, {"nombre": "Daisy Yellow", "categoria": "pompon"}, {"nombre": "Daisy Pink", "categoria": "pompon"}, {"nombre": "Daisy Hot Pink", "categoria": "pompon"}, {"nombre": "Daisy Lavender", "categoria": "pompon"}, {"nombre": "Daisy Orange", "categoria": "pompon"}, {"nombre": "Daisy Purple", "categoria": "pompon"}, {"nombre": "Daisy Light Bronze", "categoria": "pompon"}, {"nombre": "Daisy Dark Bronze", "categoria": "pompon"}, {"nombre": "Daisy Red", "categoria": "pompon"}, {"nombre": "Purple Green", "categoria": "pompon"}, {"nombre": "Purple Micro Poms", "categoria": "pompon"}, {"nombre": "Pink Micro Poms", "categoria": "pompon"}, {"nombre": "Viking Yellow", "categoria": "pompon"}, {"nombre": "Orinoco Dsy", "categoria": "pompon"}, {"nombre": "Gerbera Pink", "categoria": "Gerbera"}, {"nombre": "Gerbera Red", "categoria": "Gerbera"}, {"nombre": "Gerbera White", "categoria": "Gerbera"}, {"nombre": "Gerbera Purple", "categoria": "Gerbera"}, {"nombre": "Gerbera Green", "categoria": "Gerbera"}, {"nombre": "Gerbera Dark Pink", "categoria": "Gerbera"}, {"nombre": "Gerbera Orange", "categoria": "Gerbera"}, {"nombre": "Gerbera Burgundy", "categoria": "Gerbera"}, {"nombre": "Gerbera Hot Pink", "categoria": "Gerbera"}, {"nombre": "Gerbera Yellow", "categoria": "Gerbera"}, {"nombre": "Hydrangea Blue", "categoria": "Hydrangea"}, {"nombre": "Hydrangea Pink", "categoria": "Hydrangea"}, {"nombre": "Hydrangea Green", "categoria": "Hydrangea"}, {"nombre": "Hydrangea White", "categoria": "Hydrangea"}, {"nombre": "Mini Hydrangea  Green", "categoria": "Mini-Hydrangea"}, {"nombre": "Hypericum Pink", "categoria": "Hypericum"}, {"nombre": "Hypericum Green", "categoria": "Hypericum"}, {"nombre": "Hypericum Orange", "categoria": "Hypericum"}, {"nombre": "Hypericum Red", "categoria": "Hypericum"}, {"nombre": "Kangaroo Orange", "categoria": "Kangaroo"}, {"nombre": "Kangaroo Yellow", "categoria": "Kangaroo"}, {"nombre": "Kangaroo Green", "categoria": "Kangaroo"}, {"nombre": "Kangaroo Red", "categoria": "Kangaroo"}, {"nombre": "Limonium Purple", "categoria": "Limonium"}, {"nombre": "Limonium White", "categoria": "Limonium"}, {"nombre": "Limonium Lavender", "categoria": "Limonium"}, {"nombre": "Limonium Peach", "categoria": "Limonium"}, {"nombre": "Limonium Pink", "categoria": "Limonium"}, {"nombre": "Limonium Yellow", "categoria": "Limonium"}, {"nombre": "Matsumoto Red", "categoria": "Matsumoto"}, {"nombre": "Matsumoto Blue", "categoria": "Matsumoto"}, {"nombre": "Matsumoto Pink", "categoria": "Matsumoto"}, {"nombre": "Matsumoto Purple", "categoria": "Matsumoto"}, {"nombre": "Matsumoto Hot Pink", "categoria": "Matsumoto"}, {"nombre": "Matsumoto White", "categoria": "Matsumoto"}, {"nombre": "Ranunculus Pink", "categoria": "Ranunculus"}, {"nombre": "Ranunculus White", "categoria": "Ranunculus"}, {"nombre": "Ranunculus Yellow", "categoria": "Ranunculus"}, {"nombre": "Snapdragon Orange", "categoria": "Snapdragon"}, {"nombre": "Snapdragon Pink", "categoria": "Snapdragon"}, {"nombre": "Snapdragon Yellow", "categoria": "Snapdragon"}, {"nombre": "Snapdragon Purple", "categoria": "Snapdragon"}, {"nombre": "Snapdragon White", "categoria": "Snapdragon"}, {"nombre": "Spider Mums White", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Yellow", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Light Bronze", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Dark Bronze", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Green", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Lavanda", "categoria": "Spider Mums"}, {"nombre": "Spider Mums Purple", "categoria": "Spider Mums"}, {"nombre": "Statice Pink", "categoria": "Statice"}, {"nombre": "Statice Purple", "categoria": "Statice"}, {"nombre": "Statice White", "categoria": "Statice"}, {"nombre": "Ave De Paraiso", "categoria": "Verde"}, {"nombre": "Baby Blue", "categoria": "Verde"}, {"nombre": "Bear Grass", "categoria": "Verde"}, {"nombre": "Bells Of Ireland", "categoria": "Verde"}, {"nombre": "Brillantina", "categoria": "Verde"}, {"nombre": "Cocculus", "categoria": "Verde"}, {"nombre": "Craspedia Yellow", "categoria": "Verde"}, {"nombre": "Eryngium", "categoria": "Verde"}, {"nombre": "Euc Cinerea", "categoria": "Eucalyptus"}, {"nombre": "Euc Gunni", "categoria": "Eucalyptus"}, {"nombre": "Euc Parvifolia", "categoria": "Eucalyptus"}, {"nombre": "Euc Silver Dollar", "categoria": "Eucalyptus"}, {"nombre": "Eucalyptus", "categoria": "Eucalyptus"}, {"nombre": "Green Pino", "categoria": "Verde"}, {"nombre": "Gypso", "categoria": "Gypso"}, {"nombre": "Kale", "categoria": "Verde"}, {"nombre": "Leather Leaf", "categoria": "Verde"}, {"nombre": "Leucadendron Red", "categoria": "Verde"}, {"nombre": "Ligustrum", "categoria": "Verde"}, {"nombre": "Lily Grass", "categoria": "Verde"}, {"nombre": "Pilea", "categoria": "Verde"}, {"nombre": "Pittosporum", "categoria": "Verde"}, {"nombre": "Ruscus", "categoria": "Verde"}, {"nombre": "Solidago", "categoria": "Verde"}, {"nombre": "Star Of Bethlehem", "categoria": "Verde"}, {"nombre": "Sunflower", "categoria": "Verde"}, {"nombre": "Traqueleo", "categoria": "Verde"}, {"nombre": "Trefern", "categoria": "Verde"}, {"nombre": "Variegated Pittosporum", "categoria": "Verde"}, {"nombre": "Viburnum", "categoria": "Verde"}, {"nombre": "Single Red Roses", "categoria": "Verde"}, {"nombre": "Single Red Roses Fillers", "categoria": "Verde"}, {"nombre": "Single Asst Roses", "categoria": "Verde"}, {"nombre": "Single Asst Roses Fillers", "categoria": "Verde"}, {"nombre": "Carnations White", "categoria": "Carnations"}, {"nombre": "Carnations Yellow", "categoria": "Carnations"}, {"nombre": "Carnations Pink", "categoria": "Carnations"}, {"nombre": "Carnations Hot Pink", "categoria": "Carnations"}, {"nombre": "Carnations Lavender", "categoria": "Carnations"}, {"nombre": "Carnations Orange", "categoria": "Carnations"}, {"nombre": "Carnations Purple", "categoria": "Carnations"}, {"nombre": "Carnations Light Bronze", "categoria": "Carnations"}, {"nombre": "Carnations Dark Bronze", "categoria": "Carnations"}, {"nombre": "Carnations Red", "categoria": "Carnations"}, {"nombre": "Carnations Green", "categoria": "Carnations"}, {"nombre": "Carnations Peach", "categoria": "Carnations"}, {"nombre": "Mini Carnations White", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Yellow", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Pink", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Hot Pink", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Lavender", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Orange", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Purple", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Light Bronze", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Dark Bronze", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Red", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Green", "categoria": "Mini Carnations"}, {"nombre": "Mini Carnations Peach", "categoria": "Mini Carnations"}, {"nombre": "Dianthus White", "categoria": "Dianthus"}, {"nombre": "Dianthus Yellow", "categoria": "Dianthus"}, {"nombre": "Dianthus Pink", "categoria": "Dianthus"}, {"nombre": "Dianthus Hot Pink", "categoria": "Dianthus"}, {"nombre": "Dianthus Lavender", "categoria": "Dianthus"}, {"nombre": "Dianthus Orange", "categoria": "Dianthus"}, {"nombre": "Dianthus Purple", "categoria": "Dianthus"}, {"nombre": "Dianthus Light Bronze", "categoria": "Dianthus"}, {"nombre": "Dianthus Dark Bronze", "categoria": "Dianthus"}, {"nombre": "Dianthus Red", "categoria": "Dianthus"}, {"nombre": "Dianthus Green", "categoria": "Dianthus"}, {"nombre": "Dianthus Peach", "categoria": "Dianthus"}, {"nombre": "Green Ball", "categoria": "Verde"}, {"nombre": "Mini Calla White", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Pink", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Lavender", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Orange", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Hot Pink", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Peach", "categoria": "Mini Calla"}, {"nombre": "Mini calla Yellow", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Purple", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Red", "categoria": "Mini Calla"}, {"nombre": "Mini Calla Green", "categoria": "Mini Calla"}, {"nombre": "Stock White", "categoria": "Stock"}, {"nombre": "Stock Yellow", "categoria": "Stock"}, {"nombre": "Stock Pink", "categoria": "Stock"}, {"nombre": "Stock Hot Pink", "categoria": "Stock"}, {"nombre": "Stock Lavender", "categoria": "Stock"}, {"nombre": "Stock Orange", "categoria": "Stock"}, {"nombre": "Stock Purple", "categoria": "Stock"}, {"nombre": "Stock Light Bronze", "categoria": "Stock"}, {"nombre": "Stock Dark Bronze", "categoria": "Stock"}, {"nombre": "Stock Red", "categoria": "Stock"}, {"nombre": "Stock Green", "categoria": "Stock"}, {"nombre": "Stock Peach", "categoria": "Stock"}, {"nombre": "Aster White", "categoria": "Aster"}, {"nombre": "Aster Purple", "categoria": "Aster"}, {"nombre": "Aster Pink", "categoria": "Aster"}, {"nombre": "Palma Robelina", "categoria": "verde"}, {"nombre": "Liatris Purple", "categoria": "Liatris"}, {"nombre": "Liatris White", "categoria": "Liatris"}]
+
+
+def init_db():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS flores (
+        id SERIAL PRIMARY KEY,
+        nombre TEXT UNIQUE NOT NULL,
+        categoria TEXT,
+        stock_ramos INTEGER DEFAULT 0,
+        stock_tallos INTEGER DEFAULT 0,
+        alerta_minimo INTEGER DEFAULT 50,
+        activo INTEGER DEFAULT 1
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS movimientos (
+        id SERIAL PRIMARY KEY,
+        fecha TEXT NOT NULL,
+        flor_nombre TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        cantidad_ramos INTEGER DEFAULT 0,
+        cantidad_tallos INTEGER DEFAULT 0,
+        origen TEXT,
+        proveedor TEXT,
+        fecha_remision TEXT,
+        usuario TEXT DEFAULT 'sistema',
+        notas TEXT
+    )""")
+    for p in CATALOGO:
+        c.execute(
+            "INSERT INTO flores (nombre, categoria) VALUES (%s, %s) ON CONFLICT (nombre) DO NOTHING",
+            (p["nombre"], p["categoria"])
+        )
+    conn.commit()
+    conn.close()
+
+
+HTML = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Expowonder Inventario</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f0f7f4; color: #222; }
+.header { background: #1D9E75; color: white; padding: 14px 20px; position: sticky; top: 0; z-index: 100; }
+.header h1 { font-size: 18px; font-weight: 600; }
+.header p { font-size: 12px; opacity: 0.85; margin-top: 1px; }
+.tabs { display: flex; background: white; border-bottom: 1px solid #eee; position: sticky; top: 54px; z-index: 99; overflow-x: auto; }
+.tab { flex: 1; min-width: 70px; padding: 11px 4px; font-size: 11px; font-weight: 500; text-align: center; cursor: pointer; color: #888; border-bottom: 3px solid transparent; white-space: nowrap; }
+.tab.active { color: #1D9E75; border-bottom-color: #1D9E75; }
+.container { padding: 14px; max-width: 500px; margin: 0 auto; }
+.card { background: white; border-radius: 12px; padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.07); }
+.card h2 { font-size: 14px; font-weight: 600; color: #1D9E75; margin-bottom: 10px; }
+label { font-size: 12px; color: #666; display: block; margin-bottom: 3px; margin-top: 10px; }
+input, select { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; background: #fafafa; }
+input:focus { outline: none; border-color: #1D9E75; background: white; }
+.btn { width: 100%; padding: 13px; background: #1D9E75; color: white; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; margin-top: 12px; cursor: pointer; }
+.btn:active { background: #0F6E56; }
+.btn-gray { background: #555; }
+.btn-red { background: #C0392B; }
+.btn-sm { padding: 8px 14px; font-size: 13px; margin-top: 0; width: 100%; border-radius: 8px; }
+.msg { padding: 12px; border-radius: 8px; font-size: 14px; margin-top: 10px; text-align: center; font-weight: 500; }
+.msg.ok { background: #E0F5EC; color: #0F6E56; }
+.msg.err { background: #FCEBEB; color: #A32D2D; }
+.msg.warn { background: #FFF3E0; color: #854F0B; }
+.search-box { position: relative; }
+.search-results { display: none; position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ddd; border-radius: 8px; max-height: 180px; overflow-y: auto; z-index: 300; box-shadow: 0 4px 12px rgba(0,0,0,0.12); }
+.search-item { padding: 10px 12px; cursor: pointer; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+.search-item:active { background: #f0f7f4; }
+.search-item small { color: #888; font-size: 11px; display: block; }
+.flor-tag { display: flex; align-items: center; justify-content: space-between; background: #E0F5EC; border-radius: 8px; padding: 8px 12px; margin-top: 6px; }
+.flor-tag span { font-size: 13px; color: #0F6E56; font-weight: 500; }
+.flor-tag button { background: none; border: none; font-size: 18px; color: #888; cursor: pointer; }
+.carrito { background: #f5f5f5; border-radius: 10px; padding: 10px; margin-top: 10px; }
+.carrito-titulo { font-size: 12px; font-weight: 600; color: #555; margin-bottom: 8px; }
+.carrito-item { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #e0e0e0; font-size: 13px; }
+.carrito-item:last-child { border-bottom: none; }
+.carrito-item button { background: none; border: none; color: #C0392B; cursor: pointer; font-size: 16px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.alerta-box { background: #FFF3E0; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+.alerta-box h3 { font-size: 13px; color: #854F0B; margin-bottom: 6px; }
+.alerta-item { font-size: 12px; color: #633806; padding: 4px 0; border-bottom: 1px solid #FFE0A0; }
+.alerta-item:last-child { border-bottom: none; }
+.tipo-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.tipo-btn { padding: 10px; border: 2px solid #ddd; border-radius: 10px; text-align: center; cursor: pointer; font-size: 13px; font-weight: 500; color: #555; background: white; }
+.tipo-btn.activo-verde { border-color: #1D9E75; color: #1D9E75; background: #E0F5EC; }
+.tipo-btn.activo-rojo { border-color: #C0392B; color: #C0392B; background: #FCEBEB; }
+.section { display: none; }
+.section.active { display: block; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { background: #E0F5EC; padding: 7px 5px; text-align: left; font-size: 11px; font-weight: 600; }
+td { padding: 7px 5px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+.badge-ok { color: #0F6E56; font-weight: 600; }
+.badge-bajo { color: #A32D2D; font-weight: 600; }
+.nueva-link { font-size: 12px; color: #1D9E75; margin-top: 8px; cursor: pointer; text-decoration: underline; display: inline-block; }
+.nueva-form { display: none; margin-top: 8px; padding: 10px; background: #f9f9f9; border-radius: 8px; }
+.mov-card { background: #f9f9f9; border-radius: 8px; padding: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: flex-start; }
+.mov-info { font-size: 13px; }
+.mov-info strong { display: block; margin-bottom: 2px; }
+.mov-info small { color: #888; font-size: 11px; }
+.btn-eliminar { background: #C0392B; color: white; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; margin-left: 8px; }
+.mov-entrada { border-left: 3px solid #1D9E75; }
+.mov-salida { border-left: 3px solid #C0392B; }
+.mov-cambio { border-left: 3px solid #F39C12; }
+.mov-ajuste { border-left: 3px solid #8E44AD; }
+.mov-elim { border-left: 3px solid #7F8C8D; background: #f2f2f2; }
+</style>
+</head>
+<body>
+
+<!-- PANTALLA DE ACCESO -->
+<div id="login-screen" style="display:none;position:fixed;inset:0;background:#f0f7f4;z-index:900;overflow-y:auto">
+  <div style="max-width:420px;margin:0 auto;padding:40px 20px">
+    <div style="text-align:center;margin-bottom:26px">
+      <div style="font-size:34px">&#127800;</div>
+      <div style="font-size:20px;font-weight:600;color:#1D9E75;margin-top:6px">Expowonder ERP</div>
+      <div style="font-size:13px;color:#888">Control de inventario de flores</div>
+    </div>
+
+    <div class="card">
+      <h2>Identificate para continuar</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:12px">
+        Todo lo que registres queda a tu nombre.
+      </p>
+
+      <label>Tu nombre</label>
+      <select id="login-nombre"><option value="">-- Selecciona tu nombre --</option></select>
+
+      <label>Tu PIN</label>
+      <input type="password" id="login-pin" inputmode="numeric" maxlength="3"
+             placeholder="3 digitos" style="letter-spacing:6px;font-size:20px;text-align:center"
+             onkeydown="if(event.key==='Enter') hacerLogin()">
+
+      <button class="btn" onclick="hacerLogin()">Entrar</button>
+      <div id="login-msg"></div>
+    </div>
+
+    <p style="font-size:11px;color:#aaa;text-align:center;margin-top:14px">
+      Si olvidaste tu PIN, pideselo al administrador.
+    </p>
+  </div>
+</div>
+
+<div class="header">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <h1>&#127800; Expowonder ERP</h1>
+      <p>Control de inventario <span style="opacity:.6">v4.2</span></p>
+    </div>
+    <div style="text-align:right">
+      <div id="sesion-nombre" style="font-size:12px;font-weight:600"></div>
+      <div onclick="cerrarSesion()" style="font-size:11px;opacity:.8;cursor:pointer;
+           text-decoration:underline;margin-top:2px">Salir</div>
+    </div>
+  </div>
+</div>
+<div class="tabs">
+  <div class="tab active" onclick="showTab('entrada',this)">&#128230; Entrada</div>
+  <div class="tab" onclick="showTab('baja',this)">&#128683; Baja/Cambio</div>
+  <div class="tab" onclick="showTab('stock',this)">&#128200; Stock</div>
+  <div class="tab" onclick="showTab('datos',this)">&#128202; Datos</div>
+  <div class="tab" onclick="showTab('ajuste',this)">&#9878; Ajuste</div>
+  <div class="tab" onclick="showTab('historial',this)">&#128221; Historial</div>
+</div>
+
+<div class="container">
+
+  <!-- ENTRADA -->
+  <div class="section active" id="tab-entrada">
+    <div class="card">
+      <h2>&#128230; Registrar entrada de flores</h2>
+      <label>Proveedor</label>
+      <input type="text" id="e-proveedor" placeholder="Nombre del proveedor">
+      <label>Fecha de remision</label>
+      <input type="date" id="e-fecha">
+      <input type="hidden" id="e-usuario">
+      <div style="margin-top:12px;border-top:1px solid #eee;padding-top:12px">
+        <div style="background:#f9f9f9;border-radius:10px;padding:12px">
+          <div style="font-size:13px;font-weight:600;color:#1D9E75;margin-bottom:8px">Agregar flor al listado</div>
+          <label>Buscar flor</label>
+          <div class="search-box">
+            <input type="text" id="e-buscar" placeholder="Escribe para buscar..." oninput="filtrar('e-buscar','e-lista')" autocomplete="off" onblur="ocultarLista('e-lista')">
+            <div class="search-results" id="e-lista"></div>
+          </div>
+          <div id="e-tag" class="flor-tag" style="display:none">
+            <span id="e-tag-nombre"></span>
+            <button onclick="limpiarTag('e')">&#10005;</button>
+          </div>
+          <div class="row2">
+            <div><label>Ramos completos</label><input type="number" id="e-ramos" min="0" value="0"></div>
+            <div><label>Tallos sueltos</label><input type="number" id="e-tallos" min="0" value="0"></div>
+          </div>
+          <button class="btn btn-gray btn-sm" style="margin-top:10px" onclick="agregarCarrito()">+ Agregar al listado</button>
+        </div>
+        <div id="carrito-box" class="carrito" style="display:none">
+          <div class="carrito-titulo">&#128230; Flores a registrar:</div>
+          <div id="carrito-items"></div>
+        </div>
+        <span class="nueva-link" onclick="toggle('nueva-e')">+ Agregar flor nueva que no esta en la lista</span>
+        <div class="nueva-form" id="nueva-e">
+          <label>Nombre</label><input type="text" id="e-nueva-nom" placeholder="Ej: Rose Sunset">
+          <label>Categoria</label><input type="text" id="e-nueva-cat" placeholder="Ej: Rosa">
+          <button class="btn btn-gray btn-sm" style="margin-top:8px" onclick="nuevaFlor('e')">Guardar flor nueva</button>
+        </div>
+      </div>
+      <button class="btn" onclick="registrarEntrada()">&#10003; Registrar todas las entradas</button>
+      <div id="e-msg"></div>
+    </div>
+  </div>
+
+  <!-- BAJA / CAMBIO -->
+  <div class="section" id="tab-baja">
+    <div class="card">
+      <h2>&#128683; Baja por dano o Cambio en despacho</h2>
+      <label>Tipo</label>
+      <div class="tipo-selector">
+        <div class="tipo-btn activo-rojo" id="btn-dano" onclick="setTipo('dano')">&#128683; Baja por dano</div>
+        <div class="tipo-btn" id="btn-cambio" onclick="setTipo('cambio')">&#8646; Cambio despacho</div>
+      </div>
+      <label>Proveedor</label><input type="text" id="b-proveedor" placeholder="Nombre del proveedor">
+      <label>Fecha</label><input type="date" id="b-fecha">
+      <input type="hidden" id="b-usuario">
+      <div id="sec-dano">
+        <label>Flor danada</label>
+        <div class="search-box">
+          <input type="text" id="b-buscar" placeholder="Buscar flor..." oninput="filtrar('b-buscar','b-lista')" autocomplete="off" onblur="ocultarLista('b-lista')">
+          <div class="search-results" id="b-lista"></div>
+        </div>
+        <div id="b-tag" class="flor-tag" style="display:none;background:#FCEBEB">
+          <span id="b-tag-nombre" style="color:#C0392B"></span>
+          <button onclick="limpiarTag('b')">&#10005;</button>
+        </div>
+        <div class="row2">
+          <div><label>Ramos a dar de baja</label><input type="number" id="b-ramos" min="0" value="0"></div>
+          <div><label>Tallos sueltos</label><input type="number" id="b-tallos" min="0" value="0"></div>
+        </div>
+        <label>Notas (opcional)</label>
+        <input type="text" id="b-notas" placeholder="Ej: llegaron marchitas">
+      </div>
+      <div id="sec-cambio" style="display:none">
+        <div style="background:#FFF3E0;border-radius:8px;padding:10px;margin-top:10px;font-size:12px;color:#854F0B">
+          &#9888; La flor original se devuelve al stock. La flor enviada se descuenta.
+        </div>
+        <label>Flor ORIGINAL (la que pedia la orden)</label>
+        <div class="search-box">
+          <input type="text" id="co-buscar" placeholder="Buscar flor original..." oninput="filtrar('co-buscar','co-lista')" autocomplete="off" onblur="ocultarLista('co-lista')">
+          <div class="search-results" id="co-lista"></div>
+        </div>
+        <div id="co-tag" class="flor-tag" style="display:none">
+          <span id="co-tag-nombre"></span>
+          <button onclick="limpiarTagC('orig')">&#10005;</button>
+        </div>
+        <label>Flor ENVIADA (la que se mando realmente)</label>
+        <div class="search-box">
+          <input type="text" id="ce-buscar" placeholder="Buscar flor enviada..." oninput="filtrar('ce-buscar','ce-lista')" autocomplete="off" onblur="ocultarLista('ce-lista')">
+          <div class="search-results" id="ce-lista"></div>
+        </div>
+        <div id="ce-tag" class="flor-tag" style="display:none;background:#FCEBEB">
+          <span id="ce-tag-nombre" style="color:#C0392B"></span>
+          <button onclick="limpiarTagC('env')">&#10005;</button>
+        </div>
+        <div class="row2" style="margin-top:10px">
+          <div><label>Ramos</label><input type="number" id="c-ramos" min="0" value="0"></div>
+          <div><label>Tallos sueltos</label><input type="number" id="c-tallos" min="0" value="0"></div>
+        </div>
+        <div style="background:#FFF3E0;border-radius:8px;padding:10px;margin-top:10px;display:flex;align-items:center;gap:10px">
+          <input type="checkbox" id="c-no-estaba" style="width:20px;height:20px;margin:0;cursor:pointer">
+          <label for="c-no-estaba" style="margin:0;font-size:13px;color:#854F0B;cursor:pointer">La flor original <strong>no estaba en stock</strong> (no sumar al inventario)</label>
+        </div>
+        <label>Notas (opcional)</label>
+        <input type="text" id="c-notas" placeholder="Ej: cliente acepto el cambio">
+      </div>
+      <button class="btn btn-red" onclick="registrarBaja()">Registrar</button>
+      <div id="b-msg"></div>
+    </div>
+  </div>
+
+  <!-- STOCK -->
+  <div class="section" id="tab-stock">
+    <div class="card">
+      <h2>&#128200; Stock actual</h2>
+      <input type="text" id="s-filtro" placeholder="Filtrar por nombre..." oninput="filtrarStock()" style="margin-bottom:6px">
+      <p style="font-size:11px;color:#888;margin-bottom:8px">Toca una flor para ver su historial completo.</p>
+      <button class="btn btn-gray btn-sm" style="margin-bottom:10px" onclick="exportarStock()">&#128229; Descargar stock en Excel</button>
+      <div id="stock-list">Cargando...</div>
+    </div>
+  </div>
+
+  <!-- DATOS -->
+  <div class="section" id="tab-datos">
+    <div class="card" style="padding:10px">
+      <button class="btn btn-gray btn-sm" onclick="exportarDatos()">&#128229; Descargar datos en Excel</button>
+    </div>
+    <div id="datos-content">Cargando...</div>
+  </div>
+
+  <!-- AJUSTE POR CONTEO FISICO -->
+  <div class="section" id="tab-ajuste">
+    <div class="card">
+      <h2>&#9878; Ajuste por conteo fisico</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:10px">
+        Si contaste la flor y no coincide con el sistema, aqui corriges.
+        Queda registrado quien lo hizo y por que.
+      </p>
+      <input type="hidden" id="aj-usuario">
+
+      <label>Flor</label>
+      <div class="search-box">
+        <input type="text" id="aj-buscar" placeholder="Buscar flor..." oninput="filtrar('aj-buscar','aj-lista')" autocomplete="off" onblur="ocultarLista('aj-lista')">
+        <div class="search-results" id="aj-lista"></div>
+      </div>
+      <div id="aj-tag" class="flor-tag" style="display:none">
+        <span id="aj-tag-nombre"></span>
+        <button onclick="limpiarTagAj()">&#10005;</button>
+      </div>
+
+      <div id="aj-actual" style="display:none;background:#f5f5f5;border-radius:8px;padding:10px;margin-top:10px;font-size:13px">
+        <div style="color:#666;font-size:11px;margin-bottom:4px">El sistema tiene:</div>
+        <div id="aj-actual-txt" style="font-weight:600;color:#1D9E75"></div>
+      </div>
+
+      <div class="row2">
+        <div><label>Ramos contados</label><input type="number" id="aj-ramos" min="0" value="0"></div>
+        <div><label>Tallos sueltos</label><input type="number" id="aj-tallos" min="0" value="0"></div>
+      </div>
+      <label>Motivo (opcional)</label>
+      <input type="text" id="aj-motivo" placeholder="Ej: se dano un ramo, error al contar">
+
+      <button class="btn btn-red" onclick="registrarAjuste()">&#10003; Ajustar inventario</button>
+      <div id="aj-msg"></div>
+    </div>
+  </div>
+
+  <!-- HISTORIAL -->
+  <div class="section" id="tab-historial">
+    <div class="card">
+      <h2>&#128221; Historial de movimientos</h2>
+      <p style="font-size:12px;color:#888;margin-bottom:6px">Ultimos 50 movimientos. Toca Eliminar para corregir entradas, bajas, cambios o ajustes.</p>
+      <p style="font-size:11px;color:#8E44AD;margin-bottom:12px">&#128274; Las salidas no se eliminan desde aqui. Para revertir un descuento se usa el ERP.</p>
+      <div id="historial-list">Cargando...</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let CATALOGO = [];
+let carrito = [];
+let tipoActual = "dano";
+let florSel = { e:"", b:"" };
+let florCambio = { orig:"", env:"" };
+let stockData = [];
+let PERSONAL = [];
+let florAjuste = "";
+let USUARIO = null;          // persona con la sesion abierta
+const CLAVE_SESION = "expowonder_usuario";
+
+async function init() {
+  try {
+    const hoy = new Date().toISOString().split("T")[0];
+    const fe = document.getElementById("e-fecha");
+    const fb = document.getElementById("b-fecha");
+    if (fe) fe.value = hoy;
+    if (fb) fb.value = hoy;
+
+    await cargarPersonal();
+    await revisarSesion();
+
+    const res = await fetch("/catalogo");
+    CATALOGO = await res.json();
+  } catch (e) {
+    console.error("Error en init:", e);
+  }
+}
+
+// ── SESION ──────────────────────────────────────────────────────────────
+function guardarSesion(nombre) {
+  try { localStorage.setItem(CLAVE_SESION, nombre); } catch(e) {}
+}
+function leerSesion() {
+  try { return localStorage.getItem(CLAVE_SESION); } catch(e) { return null; }
+}
+function borrarSesion() {
+  try { localStorage.removeItem(CLAVE_SESION); } catch(e) {}
+}
+
+async function revisarSesion() {
+  const guardado = leerSesion();
+  if (!guardado) { mostrarLogin(); return; }
+  try {
+    const res = await fetch("/verificar_sesion", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({nombre: guardado})
+    });
+    const data = await res.json();
+    if (data.ok) { abrirApp(guardado); }
+    else { borrarSesion(); mostrarLogin(); }
+  } catch(e) { abrirApp(guardado); }   // sin señal, dejar trabajar
+}
+
+function mostrarLogin() {
+  const sel = document.getElementById("login-nombre");
+  if (sel) {
+    sel.innerHTML = '<option value="">-- Selecciona tu nombre --</option>';
+    PERSONAL.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.nombre;
+      o.textContent = p.nombre + (p.cargo ? " (" + p.cargo + ")" : "");
+      sel.appendChild(o);
+    });
+  }
+  document.getElementById("login-screen").style.display = "block";
+}
+
+function abrirApp(nombre) {
+  USUARIO = nombre;
+  ["e-usuario","b-usuario","aj-usuario"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = nombre;
+  });
+  const lbl = document.getElementById("sesion-nombre");
+  if (lbl) lbl.textContent = nombre;
+  document.getElementById("login-screen").style.display = "none";
+}
+
+async function hacerLogin() {
+  const nombre = document.getElementById("login-nombre").value;
+  const pin    = document.getElementById("login-pin").value.trim();
+  const msg    = document.getElementById("login-msg");
+
+  if (!nombre) { msg.className="msg err"; msg.textContent="Selecciona tu nombre"; return; }
+  if (!pin)    { msg.className="msg err"; msg.textContent="Escribe tu PIN"; return; }
+
+  msg.className = "msg"; msg.textContent = "Verificando...";
+  try {
+    const res = await fetch("/login", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({nombre, pin})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      guardarSesion(data.nombre);
+      abrirApp(data.nombre);
+      document.getElementById("login-pin").value = "";
+      msg.textContent = ""; msg.className = "";
+    } else {
+      msg.className = "msg err"; msg.textContent = data.error;
+      document.getElementById("login-pin").value = "";
+    }
+  } catch(e) {
+    msg.className = "msg err"; msg.textContent = "Error de conexion";
+  }
+}
+
+function cerrarSesion() {
+  if (!confirm("Cerrar la sesion de " + (USUARIO || "") + "?")) return;
+  borrarSesion();
+  USUARIO = null;
+  ["e-usuario","b-usuario","aj-usuario"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  const lbl = document.getElementById("sesion-nombre");
+  if (lbl) lbl.textContent = "";
+  mostrarLogin();
+}
+
+function showTab(tab, el) {
+  try {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".section").forEach(s => s.classList.remove("active"));
+    const sec = document.getElementById("tab-" + tab);
+    if (sec) sec.classList.add("active");
+    if (el) el.classList.add("active");
+    if (tab === "stock") cargarStock();
+    if (tab === "datos") cargarDatos();
+    if (tab === "historial") cargarHistorial();
+  } catch (e) {
+    console.error("Error cambiando de pestana:", e);
+    alert("Error: " + e.message);
+  }
+}
+
+function ocultarLista(id) {
+  setTimeout(() => { const el = document.getElementById(id); if(el) el.style.display="none"; }, 200);
+}
+
+function filtrar(inputId, listaId) {
+  const q = document.getElementById(inputId).value.trim().toLowerCase();
+  const lista = document.getElementById(listaId);
+  if (q.length < 1) { lista.style.display="none"; return; }
+  const matches = CATALOGO.filter(p => p.nombre.toLowerCase().includes(q) || p.categoria.toLowerCase().includes(q)).slice(0,12);
+  if (!matches.length) { lista.style.display="none"; return; }
+  lista.innerHTML = "";
+  matches.forEach(p => {
+    const div = document.createElement("div");
+    div.className = "search-item";
+    div.innerHTML = p.nombre + "<small>" + p.categoria + "</small>";
+    div.onmousedown = () => elegir(inputId, listaId, p.nombre);
+    lista.appendChild(div);
+  });
+  lista.style.display = "block";
+}
+
+function elegir(inputId, listaId, nombre) {
+  document.getElementById(inputId).value = "";
+  document.getElementById(listaId).style.display = "none";
+  if (inputId === "e-buscar") { florSel.e = nombre; mostrarTag("e", nombre); }
+  else if (inputId === "b-buscar") { florSel.b = nombre; mostrarTag("b", nombre); }
+  else if (inputId === "co-buscar") { florCambio.orig = nombre; mostrarTagC("orig", nombre); }
+  else if (inputId === "ce-buscar") { florCambio.env = nombre; mostrarTagC("env", nombre); }
+  else if (inputId === "aj-buscar") {
+    florAjuste = nombre;
+    document.getElementById("aj-tag-nombre").textContent = "\u2713 " + nombre;
+    document.getElementById("aj-tag").style.display = "flex";
+    mostrarStockAjuste(nombre);
+  }
+}
+
+function mostrarTag(p, nombre) {
+  document.getElementById(p+"-tag-nombre").textContent = "✓ " + nombre;
+  document.getElementById(p+"-tag").style.display = "flex";
+}
+function limpiarTag(p) {
+  florSel[p] = "";
+  document.getElementById(p+"-tag").style.display = "none";
+  document.getElementById(p+"-buscar").value = "";
+}
+function mostrarTagC(t, nombre) {
+  const pre = t === "orig" ? "co" : "ce";
+  document.getElementById(pre+"-tag-nombre").textContent = (t==="orig"?"↩ ":"↪ ") + nombre;
+  document.getElementById(pre+"-tag").style.display = "flex";
+}
+function limpiarTagC(t) {
+  florCambio[t] = "";
+  const pre = t === "orig" ? "co" : "ce";
+  document.getElementById(pre+"-tag").style.display = "none";
+  document.getElementById(pre+"-buscar").value = "";
+}
+
+function setTipo(tipo) {
+  tipoActual = tipo;
+  document.getElementById("btn-dano").className = "tipo-btn" + (tipo==="dano" ? " activo-rojo" : "");
+  document.getElementById("btn-cambio").className = "tipo-btn" + (tipo==="cambio" ? " activo-verde" : "");
+  document.getElementById("sec-dano").style.display = tipo==="dano" ? "block" : "none";
+  document.getElementById("sec-cambio").style.display = tipo==="cambio" ? "block" : "none";
+}
+
+function agregarCarrito() {
+  const flor = florSel.e;
+  const ramos = parseInt(document.getElementById("e-ramos").value) || 0;
+  const tallos = parseInt(document.getElementById("e-tallos").value) || 0;
+  if (!flor) { showMsg("e-msg","Selecciona una flor","err"); return; }
+  if (ramos<=0 && tallos<=0) { showMsg("e-msg","Ingresa ramos o tallos","err"); return; }
+  carrito.push({flor, ramos, tallos});
+  renderCarrito();
+  limpiarTag("e");
+  document.getElementById("e-ramos").value="0";
+  document.getElementById("e-tallos").value="0";
+}
+
+function renderCarrito() {
+  const box = document.getElementById("carrito-box");
+  const items = document.getElementById("carrito-items");
+  if (!carrito.length) { box.style.display="none"; return; }
+  box.style.display = "block";
+  items.innerHTML = carrito.map((item,i) =>
+    `<div class="carrito-item"><span>${item.flor}<br><small style="color:#888">${item.ramos} ramos · ${item.tallos} tallos</small></span><button onclick="quitarCarrito(${i})">&#10005;</button></div>`
+  ).join("");
+}
+
+function quitarCarrito(i) { carrito.splice(i,1); renderCarrito(); }
+
+async function registrarEntrada() {
+  if (!carrito.length) { showMsg("e-msg","Agrega al menos una flor al listado","err"); return; }
+  const proveedor = document.getElementById("e-proveedor").value.trim();
+  const fecha = document.getElementById("e-fecha").value;
+  const usuario = (USUARIO || document.getElementById("e-usuario").value).trim() || "finca";
+  if (!proveedor) { showMsg("e-msg","Escribe el nombre del proveedor","err"); return; }
+  const res = await fetch("/entrada", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({items:carrito, proveedor, fecha_remision:fecha, usuario})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    let msg = "✓ " + data.registradas + " flores registradas correctamente.";
+    let tipo = "ok";
+    if (data.no_encontradas && data.no_encontradas.length > 0) {
+      msg += " ⚠️ No encontradas en catálogo: " + data.no_encontradas.join(", ") + ". Agrégalas con el botón 'Agregar flor nueva'.";
+      tipo = "warn";
+    }
+    showMsg("e-msg", msg, tipo);
+    carrito=[];
+    renderCarrito();
+    document.getElementById("e-proveedor").value="";
+  } else {
+    showMsg("e-msg","Error: "+data.error,"err");
+  }
+}
+
+async function registrarBaja() {
+  const proveedor = document.getElementById("b-proveedor").value.trim();
+  const fecha = document.getElementById("b-fecha").value;
+  const usuario = (USUARIO || document.getElementById("b-usuario").value).trim() || "finca";
+  if (tipoActual === "dano") {
+    const flor = florSel.b;
+    const ramos = parseInt(document.getElementById("b-ramos").value)||0;
+    const tallos = parseInt(document.getElementById("b-tallos").value)||0;
+    const notas = document.getElementById("b-notas").value.trim();
+    if (!flor) { showMsg("b-msg","Selecciona la flor danada","err"); return; }
+    if (ramos<=0 && tallos<=0) { showMsg("b-msg","Ingresa cantidad","err"); return; }
+    const res = await fetch("/baja", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({tipo:"BAJA_DANO", flor, ramos, tallos, proveedor, fecha, usuario, notas})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showMsg("b-msg","✓ Baja registrada: "+flor,"ok");
+      limpiarTag("b");
+      document.getElementById("b-ramos").value="0";
+      document.getElementById("b-tallos").value="0";
+      document.getElementById("b-notas").value="";
+    } else { showMsg("b-msg","Error: "+data.error,"err"); }
+  } else {
+    const florOrig = florCambio.orig;
+    const florEnv = florCambio.env;
+    const ramos = parseInt(document.getElementById("c-ramos").value)||0;
+    const tallos = parseInt(document.getElementById("c-tallos").value)||0;
+    const notas = document.getElementById("c-notas").value.trim();
+    if (!florOrig || !florEnv) { showMsg("b-msg","Selecciona ambas flores","err"); return; }
+    if (ramos<=0 && tallos<=0) { showMsg("b-msg","Ingresa cantidad","err"); return; }
+    const res = await fetch("/cambio", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({flor_original:florOrig, flor_enviada:florEnv, ramos, tallos, proveedor, fecha, usuario, notas, original_no_estaba: document.getElementById("c-no-estaba").checked})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      showMsg("b-msg","✓ Cambio registrado correctamente","ok");
+      limpiarTagC("orig"); limpiarTagC("env");
+      document.getElementById("c-ramos").value="0";
+      document.getElementById("c-tallos").value="0";
+      document.getElementById("c-notas").value="";
+    } else { showMsg("b-msg","Error: "+data.error,"err"); }
+  }
+}
+
+function showMsg(id, txt, tipo) {
+  const m = document.getElementById(id);
+  m.className = "msg " + tipo;
+  m.innerHTML = txt;
+  setTimeout(() => { m.textContent=""; m.className=""; }, 8000);
+}
+
+async function cargarStock() {
+  const res = await fetch("/stock");
+  stockData = await res.json();
+  renderStock(stockData);
+}
+
+function filtrarStock() {
+  const q = document.getElementById("s-filtro").value.toLowerCase();
+  renderStock(stockData.filter(f => f.nombre.toLowerCase().includes(q) || f.categoria.toLowerCase().includes(q)));
+}
+
+function renderStock(data) {
+  const div = document.getElementById("stock-list");
+  if (!data.length) { div.textContent="Sin datos"; return; }
+  let html = '<table><tr><th>Flor</th><th>Cat</th><th>Ramos</th><th>Tallos</th></tr>';
+  data.forEach(f => {
+    const neg = f.stock_ramos < 0;
+    const bajo = f.stock_ramos < f.alerta_minimo && f.stock_ramos >= 0;
+    const estilo = neg ? "color:#C0392B;font-weight:600" : (bajo ? "color:#E67E22;font-weight:600" : "");
+    const nom = f.nombre.replace(/'/g, "\\'");
+    html += `<tr onclick="verFicha('${nom}')" style="cursor:pointer">
+      <td style="${estilo}">${f.nombre}</td>
+      <td style="color:#888;font-size:11px">${f.categoria}</td>
+      <td style="text-align:center;${estilo}">${f.stock_ramos}</td>
+      <td style="text-align:center">${f.stock_tallos}</td></tr>`;
+  });
+  html += "</table>";
+  div.innerHTML = html;
+}
+
+async function cargarDatos() {
+  const div = document.getElementById("datos-content");
+  div.innerHTML = "<p style='color:#888;font-size:13px;text-align:center;padding:20px'>Cargando...</p>";
+  try {
+    const res = await fetch("/stock");
+    const data = await res.json();
+
+    const superUrg = data.filter(f => f.stock_ramos < 0).sort((a,b) => a.stock_ramos - b.stock_ramos);
+    const urgente  = data.filter(f => f.stock_ramos >= 0 && f.stock_ramos < 50).sort((a,b) => a.stock_ramos - b.stock_ramos);
+    const ok       = data.filter(f => f.stock_ramos >= 50).sort((a,b) => b.stock_ramos - a.stock_ramos);
+
+    // Total de ramos por grupo
+    const ramosSuper = superUrg.reduce((s,f) => s + Math.abs(f.stock_ramos), 0);
+    const ramosUrg   = urgente.reduce((s,f) => s + f.stock_ramos, 0);
+    const ramosOk    = ok.reduce((s,f) => s + f.stock_ramos, 0);
+
+    let html = "";
+
+    // Resumen de contadores
+    html += `<div class="card" style="padding:0;overflow:hidden">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;text-align:center">
+        <div style="padding:14px 6px;background:#FDECEA">
+          <div style="font-size:26px;font-weight:700;color:#C0392B">${superUrg.length}</div>
+          <div style="font-size:10px;color:#A32D2D;font-weight:600;margin-top:2px">SUPER URGENTE</div>
+          <div style="font-size:13px;color:#A32D2D;font-weight:700;margin-top:4px">${ramosSuper} ramos</div>
+        </div>
+        <div style="padding:14px 6px;background:#FFF3E0">
+          <div style="font-size:26px;font-weight:700;color:#E67E22">${urgente.length}</div>
+          <div style="font-size:10px;color:#854F0B;font-weight:600;margin-top:2px">URGENTE</div>
+          <div style="font-size:13px;color:#854F0B;font-weight:700;margin-top:4px">${ramosUrg} ramos</div>
+        </div>
+        <div style="padding:14px 6px;background:#E0F5EC">
+          <div style="font-size:26px;font-weight:700;color:#1D9E75">${ok.length}</div>
+          <div style="font-size:10px;color:#0F6E56;font-weight:600;margin-top:2px">SIN URGENCIA</div>
+          <div style="font-size:13px;color:#0F6E56;font-weight:700;margin-top:4px">${ramosOk} ramos</div>
+        </div>
+      </div>
+    </div>`;
+
+    // SUPER URGENTE
+    html += `<div class="card">
+      <h2 style="color:#C0392B">&#128680; Super urgente — conseguir ya (${superUrg.length} flores · ${ramosSuper} ramos)</h2>`;
+    if (!superUrg.length) {
+      html += `<p style="font-size:13px;color:#0F6E56;padding:6px 0">Ninguna flor en negativo.</p>`;
+    } else {
+      html += `<p style="font-size:11px;color:#888;margin-bottom:8px">Stock en negativo. El numero indica cuantos ramos faltan.</p>`;
+      html += `<table><tr><th>Flor</th><th style="text-align:center">Faltan</th></tr>`;
+      superUrg.forEach(f => {
+        html += `<tr><td style="color:#C0392B;font-weight:600">${f.nombre}</td>
+                 <td style="text-align:center;color:#C0392B;font-weight:700">${Math.abs(f.stock_ramos)} ramos</td></tr>`;
+      });
+      html += `</table>`;
+    }
+    html += `</div>`;
+
+    // URGENTE
+    html += `<div class="card">
+      <h2 style="color:#E67E22">&#9888;&#65039; Urgente — bajo minimo (${urgente.length} flores · ${ramosUrg} ramos)</h2>`;
+    if (!urgente.length) {
+      html += `<p style="font-size:13px;color:#0F6E56;padding:6px 0">Ninguna flor bajo el minimo.</p>`;
+    } else {
+      html += `<p style="font-size:11px;color:#888;margin-bottom:8px">Menos de 50 ramos disponibles.</p>`;
+      html += `<table><tr><th>Flor</th><th style="text-align:center">Stock</th></tr>`;
+      urgente.forEach(f => {
+        html += `<tr><td style="color:#E67E22;font-weight:500">${f.nombre}</td>
+                 <td style="text-align:center;color:#E67E22;font-weight:600">${f.stock_ramos} ramos</td></tr>`;
+      });
+      html += `</table>`;
+    }
+    html += `</div>`;
+
+    // SIN URGENCIA
+    html += `<div class="card">
+      <h2 style="color:#1D9E75">&#9989; Sin urgencia — stock suficiente (${ok.length} flores · ${ramosOk} ramos)</h2>`;
+    if (!ok.length) {
+      html += `<p style="font-size:13px;color:#888;padding:6px 0">Ninguna flor con 50 o mas ramos.</p>`;
+    } else {
+      html += `<table><tr><th>Flor</th><th style="text-align:center">Stock</th></tr>`;
+      ok.forEach(f => {
+        html += `<tr><td>${f.nombre}</td>
+                 <td style="text-align:center;color:#0F6E56;font-weight:600">${f.stock_ramos} ramos</td></tr>`;
+      });
+      html += `</table>`;
+    }
+    html += `</div>`;
+
+    div.innerHTML = html;
+  } catch(e) {
+    div.innerHTML = "<p style='color:red;font-size:13px;padding:10px'>Error cargando datos.</p>";
+  }
+}
+
+async function cargarHistorial() {
+  const div = document.getElementById("historial-list");
+  div.innerHTML = "<p style='color:#888;font-size:13px;text-align:center;padding:20px'>Cargando...</p>";
+  try {
+    const res = await fetch("/historial");
+    const data = await res.json();
+    if (!data.length) { div.innerHTML = "<p style='color:#888;font-size:13px;padding:10px'>Sin movimientos registrados.</p>"; return; }
+    let html = "";
+    data.forEach(m => {
+      let clase = "mov-entrada";
+      let icono = "&#128230;";
+      let bloqueado = false;
+      if (m.tipo === "SALIDA") { clase="mov-salida"; icono="&#128683;"; bloqueado = true; }
+      else if (m.tipo === "AJUSTE") { clase="mov-ajuste"; icono="&#9878;"; }
+      else if (m.tipo === "ELIMINACION") { clase="mov-elim"; icono="&#128465;"; bloqueado = true; }
+      else if (m.tipo.includes("BAJA")) { clase="mov-salida"; icono="&#128683;"; }
+      else if (m.tipo.includes("CAMBIO")) { clase="mov-cambio"; icono="&#8646;"; }
+
+      const boton = bloqueado
+        ? `<span style="font-size:10px;color:#aaa;white-space:nowrap;margin-left:8px;text-align:center">
+             &#128274;<br>solo ERP
+           </span>`
+        : `<button class="btn-eliminar" onclick="eliminarMov(${m.id},'${m.flor_nombre.replace(/'/g,"\\'")}','${m.tipo}','${(m.ramos||0)} ramos · ${(m.tallos||0)} tallos')">Eliminar</button>`;
+
+      html += `<div class="mov-card ${clase}">
+        <div class="mov-info">
+          <strong>${icono} ${m.flor_nombre}</strong>
+          <small>${m.tipo} &middot; ${m.ramos} ramos &middot; ${m.tallos} tallos</small>
+          <small>${m.fecha}${m.usuario ? " &middot; " + m.usuario : ""}${m.proveedor ? " &middot; " + m.proveedor : ""}</small>
+          ${m.notas ? "<small style='color:#E67E22'>" + m.notas + "</small>" : ""}
+        </div>
+        ${boton}
+      </div>`;
+    });
+    div.innerHTML = html;
+  } catch(e) {
+    div.innerHTML = "<p style='color:red;font-size:13px;padding:10px'>Error cargando historial.</p>";
+  }
+}
+
+function eliminarMov(id, nombre, tipo, cantidad) {
+  // Ventana para confirmar. Quien elimina es el de la sesion.
+  const html = `
+    <div id="modal-elim" style="position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:600;
+                display:flex;align-items:center;justify-content:center;padding:16px"
+         onclick="if(event.target===this) cerrarModalElim()">
+      <div style="background:white;border-radius:12px;max-width:420px;width:100%;padding:18px"
+           onclick="event.stopPropagation()">
+        <div style="font-size:16px;font-weight:600;color:#C0392B;margin-bottom:4px">
+          Eliminar movimiento
+        </div>
+        <div style="font-size:13px;color:#666;margin-bottom:14px">
+          ${tipo} de <strong>${nombre}</strong><br>
+          <span style="color:#888;font-size:12px">${cantidad}</span>
+        </div>
+
+        <div style="background:#FFF3E0;border-radius:8px;padding:10px;font-size:12px;
+                    color:#854F0B;margin-bottom:14px">
+          El stock volvera a como estaba. Quedara registrado quien lo elimino y por que.
+        </div>
+
+        <div style="font-size:12px;color:#666;margin-bottom:10px">
+          Lo elimina: <strong style="color:#222">${USUARIO || "-"}</strong>
+        </div>
+
+        <label style="font-size:12px;color:#666;display:block;margin-bottom:3px">
+          Por que lo elimina <span style="color:#C0392B">*</span></label>
+        <input type="text" id="elim-motivo" placeholder="Ej: me equivoque en la cantidad"
+               style="width:100%;padding:10px 12px;border:1px solid #ddd;border-radius:8px;
+                      font-size:15px;background:#fafafa">
+
+        <div id="elim-msg" style="font-size:13px;margin-top:10px"></div>
+
+        <div style="display:flex;gap:8px;margin-top:14px">
+          <button onclick="cerrarModalElim()"
+                  style="flex:1;padding:12px;background:#eee;color:#444;border:none;
+                         border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">
+            Cancelar
+          </button>
+          <button onclick="confirmarEliminar(${id})"
+                  style="flex:1;padding:12px;background:#C0392B;color:white;border:none;
+                         border-radius:10px;font-size:14px;font-weight:600;cursor:pointer">
+            Eliminar
+          </button>
+        </div>
+      </div>
+    </div>`;
+
+  const cont = document.createElement("div");
+  cont.innerHTML = html;
+  document.body.appendChild(cont.firstElementChild);
+}
+
+function cerrarModalElim() {
+  const m = document.getElementById("modal-elim");
+  if (m) m.remove();
+}
+
+async function confirmarEliminar(id) {
+  const usuario = USUARIO;
+  const motivo  = document.getElementById("elim-motivo").value.trim();
+  const msg     = document.getElementById("elim-msg");
+
+  if (!usuario) { msg.innerHTML = "<span style='color:#C0392B'>Sesion no valida, vuelve a entrar</span>"; return; }
+  if (!motivo)  { msg.innerHTML = "<span style='color:#C0392B'>Escribe por que lo eliminas</span>"; return; }
+
+  msg.innerHTML = "<span style='color:#888'>Eliminando...</span>";
+  try {
+    const res = await fetch("/eliminar_movimiento", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({id, usuario, motivo})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      cerrarModalElim();
+      cargarHistorial();
+    } else {
+      msg.innerHTML = `<span style='color:#C0392B'>${data.error}</span>`;
+    }
+  } catch(e) {
+    msg.innerHTML = "<span style='color:#C0392B'>Error de conexion</span>";
+  }
+}
+
+// ── PERSONAL ────────────────────────────────────────────────────────────
+async function cargarPersonal() {
+  try {
+    const res = await fetch("/personal");
+    PERSONAL = await res.json();
+  } catch(e) { console.error("Error cargando personal:", e); }
+}
+
+// ── AJUSTE POR CONTEO FISICO ────────────────────────────────────────────
+function limpiarTagAj() {
+  florAjuste = "";
+  document.getElementById("aj-tag").style.display = "none";
+  document.getElementById("aj-buscar").value = "";
+  document.getElementById("aj-actual").style.display = "none";
+}
+
+async function mostrarStockAjuste(nombre) {
+  try {
+    const res = await fetch("/historial_flor?flor=" + encodeURIComponent(nombre));
+    const data = await res.json();
+    if (data.stock) {
+      document.getElementById("aj-actual-txt").textContent =
+        `${data.stock.ramos} ramos  ·  ${data.stock.tallos} tallos sueltos`;
+      document.getElementById("aj-actual").style.display = "block";
+      document.getElementById("aj-ramos").value  = data.stock.ramos;
+      document.getElementById("aj-tallos").value = data.stock.tallos;
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function registrarAjuste() {
+  const usuario = (USUARIO || document.getElementById("aj-usuario").value);
+  const motivo  = document.getElementById("aj-motivo").value.trim();
+  const ramos   = parseInt(document.getElementById("aj-ramos").value) || 0;
+  const tallos  = parseInt(document.getElementById("aj-tallos").value) || 0;
+  if (!usuario)    { showMsg("aj-msg","Selecciona quien hace el ajuste","err"); return; }
+  if (!florAjuste) { showMsg("aj-msg","Selecciona la flor","err"); return; }
+
+  const res = await fetch("/ajuste", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({flor: florAjuste, usuario, motivo, ramos, tallos})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    if (data.sin_cambio) { showMsg("aj-msg", data.mensaje, "warn"); return; }
+    const dr = data.diferencia_ramos, dt = data.diferencia_tallos;
+    const signo = v => v > 0 ? "+" + v : String(v);
+    showMsg("aj-msg",
+      `Ajustado: ${signo(dr)} ramos, ${signo(dt)} tallos. Antes habia ${data.antes.ramos} ramos y ${data.antes.tallos} tallos.`,
+      "ok");
+    limpiarTagAj();
+    document.getElementById("aj-motivo").value = "";
+    document.getElementById("aj-ramos").value = "0";
+    document.getElementById("aj-tallos").value = "0";
+  } else { showMsg("aj-msg","Error: " + data.error, "err"); }
+}
+
+// ── FICHA DE UNA FLOR ───────────────────────────────────────────────────
+async function verFicha(nombre) {
+  const res = await fetch("/historial_flor?flor=" + encodeURIComponent(nombre));
+  const data = await res.json();
+
+  let html = `<div style="position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:500;overflow-y:auto;padding:16px"
+                   onclick="if(event.target===this) this.remove()">
+    <div style="background:white;border-radius:12px;max-width:520px;margin:0 auto;padding:16px" onclick="event.stopPropagation()">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px">
+        <div>
+          <div style="font-size:16px;font-weight:600;color:#1D9E75">${data.flor}</div>
+          <div style="font-size:11px;color:#888">${data.stock ? data.stock.categoria : ""}</div>
+        </div>
+        <button onclick="this.closest('div[style*=fixed]').remove()"
+                style="background:none;border:none;font-size:22px;color:#888;cursor:pointer">&times;</button>
+      </div>`;
+
+  if (data.stock) {
+    const neg = data.stock.ramos < 0;
+    html += `<div style="background:${neg?'#FDECEA':'#E0F5EC'};border-radius:8px;padding:12px;margin-bottom:12px">
+      <div style="font-size:11px;color:#666">Stock actual</div>
+      <div style="font-size:18px;font-weight:700;color:${neg?'#C0392B':'#0F6E56'}">
+        ${data.stock.ramos} ramos · ${data.stock.tallos} tallos
+      </div></div>`;
+  }
+
+  if (!data.movimientos.length) {
+    html += `<p style="font-size:13px;color:#888;padding:10px 0">Sin movimientos registrados.</p>`;
+  } else {
+    html += `<div style="font-size:12px;color:#666;margin-bottom:6px">
+               ${data.movimientos.length} movimientos (mas reciente primero)</div>`;
+    data.movimientos.forEach(m => {
+      let color = "#1D9E75", ico = "&#128230;";
+      if (m.tipo.includes("BAJA") || m.tipo.includes("SALIDA")) { color="#C0392B"; ico="&#128683;"; }
+      else if (m.tipo.includes("CAMBIO")) { color="#F39C12"; ico="&#8646;"; }
+      else if (m.tipo.includes("AJUSTE")) { color="#8E44AD"; ico="&#9878;"; }
+      const cant = [];
+      if (m.ramos)  cant.push(m.ramos + " ramos");
+      if (m.tallos) cant.push(m.tallos + " tallos");
+      html += `<div style="border-left:3px solid ${color};background:#f9f9f9;border-radius:6px;padding:8px 10px;margin-bottom:6px">
+        <div style="font-size:13px;font-weight:600;color:${color}">${ico} ${m.tipo} · ${cant.join(" · ") || "-"}</div>
+        <div style="font-size:11px;color:#888">${m.fecha}${m.usuario ? " · " + m.usuario : ""}${m.origen ? " · " + m.origen : ""}</div>
+        ${m.notas ? `<div style="font-size:11px;color:#E67E22;margin-top:2px">${m.notas}</div>` : ""}
+      </div>`;
+    });
+  }
+  html += `</div></div>`;
+
+  const cont = document.createElement("div");
+  cont.innerHTML = html;
+  document.body.appendChild(cont.firstElementChild);
+}
+
+function toggle(id) {
+  const el = document.getElementById(id);
+  el.style.display = el.style.display === "none" ? "block" : "none";
+}
+
+async function nuevaFlor(prefix) {
+  const nombre = document.getElementById(prefix+"-nueva-nom").value.trim();
+  const cat = document.getElementById(prefix+"-nueva-cat").value.trim() || "Sin categoria";
+  if (!nombre) return;
+  const res = await fetch("/agregar_flor", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({nombre, categoria:cat})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    CATALOGO.push({nombre, categoria:cat});
+    document.getElementById(prefix+"-nueva-nom").value="";
+    document.getElementById(prefix+"-nueva-cat").value="";
+    showMsg("e-msg","✓ Flor agregada: "+nombre+". Ya puedes registrar su entrada.","ok");
+  }
+}
+
+init();
+</script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    resp = app.make_response(HTML)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"]        = "no-cache"
+    resp.headers["Expires"]       = "0"
+    return resp
+
+@app.route("/catalogo")
+def catalogo():
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT nombre, categoria FROM flores WHERE activo=1 ORDER BY categoria, nombre")
+        rows = c.fetchall()
+        conn.close()
+        if rows:
+            return jsonify([{"nombre": r[0], "categoria": r[1]} for r in rows])
+    except Exception:
+        pass
+    return jsonify(CATALOGO)
+
+@app.route("/entrada", methods=["POST"])
+def entrada():
+    data = request.json
+    items = data.get("items", [])
+    proveedor = data.get("proveedor", "")
+    fecha_remision = data.get("fecha_remision", "")
+    usuario = (data.get("usuario") or "").strip()
+    if not usuario:
+        return jsonify({"ok": False,
+                        "error": "Selecciona quien esta registrando la entrada"})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        registradas = 0
+        no_encontradas = []
+        for item in items:
+            flor = item.get("flor", "").strip()
+            ramos = int(item.get("ramos", 0))
+            tallos = int(item.get("tallos", 0))
+            if not flor:
+                continue
+            # ── CAMBIO CLAVE: si no existe en catálogo, NO crear — avisar
+            c.execute("SELECT id FROM flores WHERE LOWER(nombre)=LOWER(%s)", (flor,))
+            if not c.fetchone():
+                no_encontradas.append(flor)
+                continue
+            c.execute(
+                "UPDATE flores SET stock_ramos=stock_ramos+%s, stock_tallos=stock_tallos+%s WHERE LOWER(nombre)=LOWER(%s)",
+                (ramos, tallos, flor)
+            )
+            c.execute(
+                "INSERT INTO movimientos (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos, origen, proveedor, fecha_remision, usuario) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (ahora().strftime("%Y-%m-%d %H:%M"), flor, "ENTRADA", ramos, tallos, "REMISION", proveedor, fecha_remision, usuario)
+            )
+            normalizar_stock(c, flor)
+            registradas += 1
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "registradas": registradas, "no_encontradas": no_encontradas})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/baja", methods=["POST"])
+def baja():
+    data = request.json
+    flor = data.get("flor", "").strip()
+    ramos = int(data.get("ramos", 0))
+    tallos = int(data.get("tallos", 0))
+    proveedor = data.get("proveedor", "")
+    fecha = data.get("fecha", "")
+    usuario = (data.get("usuario") or "").strip()
+    notas = data.get("notas", "")
+    tipo = data.get("tipo", "BAJA_DANO")
+    if not usuario:
+        return jsonify({"ok": False,
+                        "error": "Selecciona quien esta registrando la baja"})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute(
+            "UPDATE flores SET stock_ramos=stock_ramos-%s, stock_tallos=stock_tallos-%s WHERE LOWER(nombre)=LOWER(%s)",
+            (ramos, tallos, flor)
+        )
+        c.execute(
+            "INSERT INTO movimientos (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos, origen, proveedor, fecha_remision, usuario, notas) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (ahora().strftime("%Y-%m-%d %H:%M"), flor, tipo, ramos, tallos, "BAJA", proveedor, fecha, usuario, notas)
+        )
+        normalizar_stock(c, flor)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/cambio", methods=["POST"])
+def cambio():
+    data = request.json
+    flor_orig = data.get("flor_original", "").strip()
+    flor_env = data.get("flor_enviada", "").strip()
+    ramos = int(data.get("ramos", 0))
+    tallos = int(data.get("tallos", 0))
+    proveedor = data.get("proveedor", "")
+    fecha = data.get("fecha", "")
+    usuario = (data.get("usuario") or "").strip()
+    notas = data.get("notas", "")
+    original_no_estaba = data.get("original_no_estaba", False)
+    if not usuario:
+        return jsonify({"ok": False,
+                        "error": "Selecciona quien esta registrando el cambio"})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        if not original_no_estaba:
+            c.execute(
+                "UPDATE flores SET stock_ramos=stock_ramos+%s, stock_tallos=stock_tallos+%s WHERE LOWER(nombre)=LOWER(%s)",
+                (ramos, tallos, flor_orig)
+            )
+        nota_orig = ("No estaba en stock. " if original_no_estaba else "") + "Cambio por: " + flor_env + ". " + notas
+        c.execute(
+            "INSERT INTO movimientos (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos, origen, proveedor, fecha_remision, usuario, notas) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (ahora().strftime("%Y-%m-%d %H:%M"), flor_orig, "CAMBIO_DEVOLUCION", ramos, tallos, "CAMBIO", proveedor, fecha, usuario, nota_orig)
+        )
+        c.execute(
+            "UPDATE flores SET stock_ramos=stock_ramos-%s, stock_tallos=stock_tallos-%s WHERE LOWER(nombre)=LOWER(%s)",
+            (ramos, tallos, flor_env)
+        )
+        c.execute(
+            "INSERT INTO movimientos (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos, origen, proveedor, fecha_remision, usuario, notas) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (ahora().strftime("%Y-%m-%d %H:%M"), flor_env, "CAMBIO_SALIDA", ramos, tallos, "CAMBIO", proveedor, fecha, usuario, "Sustituyo a: "+flor_orig+". "+notas)
+        )
+        normalizar_stock(c, flor_orig)
+        normalizar_stock(c, flor_env)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/historial")
+def historial():
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""SELECT id, fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos, usuario, proveedor, notas
+                     FROM movimientos ORDER BY id DESC LIMIT 50""")
+        rows = c.fetchall()
+        conn.close()
+        return jsonify([{"id":r[0],"fecha":r[1],"flor_nombre":r[2],"tipo":r[3],
+                         "ramos":r[4],"tallos":r[5],"usuario":r[6],"proveedor":r[7] or "","notas":r[8] or ""} for r in rows])
+    except Exception as e:
+        return jsonify([])
+
+@app.route("/eliminar_movimiento", methods=["POST"])
+def eliminar_movimiento():
+    """
+    Elimina un movimiento y devuelve el stock a como estaba.
+    Queda registrado quien lo elimino y por que.
+    Las SALIDAS no se pueden eliminar desde la app.
+    """
+    data    = request.json
+    mov_id  = data.get("id")
+    usuario = (data.get("usuario") or "").strip()
+    motivo  = (data.get("motivo") or "").strip()
+
+    if not usuario:
+        return jsonify({"ok": False, "error": "Selecciona quien esta eliminando"})
+    if not motivo:
+        return jsonify({"ok": False, "error": "Escribe por que lo eliminas"})
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""SELECT flor_nombre, tipo, cantidad_ramos, cantidad_tallos,
+                            fecha, origen, usuario, proveedor
+                     FROM movimientos WHERE id=%s""", (mov_id,))
+        mov = c.fetchone()
+        if not mov:
+            conn.close()
+            return jsonify({"ok": False, "error": "Ese movimiento ya no existe"})
+
+        flor, tipo, ramos, tallos, fecha_org, origen, usr_org, prov = mov
+        ramos  = ramos or 0
+        tallos = tallos or 0
+
+        # Las salidas solo se revierten desde el ERP
+        if tipo == "SALIDA":
+            conn.close()
+            return jsonify({"ok": False,
+                "error": "Las salidas no se pueden eliminar desde la app. "
+                         "Para revertir un descuento usa el ERP."})
+
+        # Devolver el stock a como estaba
+        if tipo == "ENTRADA":
+            c.execute("""UPDATE flores SET stock_ramos=stock_ramos-%s,
+                         stock_tallos=stock_tallos-%s
+                         WHERE LOWER(nombre)=LOWER(%s)""", (ramos, tallos, flor))
+        elif tipo in ("BAJA_DANO", "BAJA_DAÑO", "CAMBIO_SALIDA"):
+            c.execute("""UPDATE flores SET stock_ramos=stock_ramos+%s,
+                         stock_tallos=stock_tallos+%s
+                         WHERE LOWER(nombre)=LOWER(%s)""", (ramos, tallos, flor))
+        elif tipo == "CAMBIO_DEVOLUCION":
+            c.execute("""UPDATE flores SET stock_ramos=stock_ramos-%s,
+                         stock_tallos=stock_tallos-%s
+                         WHERE LOWER(nombre)=LOWER(%s)""", (ramos, tallos, flor))
+        elif tipo == "AJUSTE":
+            # El ajuste guardo la diferencia aplicada: se resta para deshacerlo
+            c.execute("""UPDATE flores SET stock_ramos=stock_ramos-%s,
+                         stock_tallos=stock_tallos-%s
+                         WHERE LOWER(nombre)=LOWER(%s)""", (ramos, tallos, flor))
+
+        # Borrar el original
+        c.execute("DELETE FROM movimientos WHERE id=%s", (mov_id,))
+
+        # Dejar constancia de la eliminacion
+        cant = []
+        if ramos:  cant.append(f"{ramos} ramos")
+        if tallos: cant.append(f"{tallos} tallos")
+        nota = (f"Elimino un movimiento de tipo {tipo} de {' y '.join(cant) or '0'}, "
+                f"registrado el {fecha_org}"
+                + (f" por {usr_org}" if usr_org else "")
+                + (f" ({prov})" if prov else "")
+                + f". Motivo: {motivo}")
+
+        c.execute("""INSERT INTO movimientos
+                        (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos,
+                         origen, usuario, notas)
+                     VALUES (%s,%s,'ELIMINACION',%s,%s,'CORRECCION',%s,%s)""",
+                  (ahora().strftime("%Y-%m-%d %H:%M"), flor,
+                   ramos, tallos, usuario, nota))
+
+        normalizar_stock(c, flor)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "tipo": tipo, "flor": flor,
+                        "ramos": ramos, "tallos": tallos})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/stock")
+def stock():
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT nombre, categoria, stock_ramos, stock_tallos, alerta_minimo FROM flores WHERE activo=1 ORDER BY categoria, nombre")
+        rows = c.fetchall()
+        conn.close()
+        return jsonify([{"nombre":r[0],"categoria":r[1],"stock_ramos":r[2],"stock_tallos":r[3],"alerta_minimo":r[4]} for r in rows])
+    except:
+        return jsonify([])
+
+@app.route("/login", methods=["POST"])
+def login():
+    """Valida el nombre y el PIN. La app guarda la sesion en el celular."""
+    data   = request.json
+    nombre = (data.get("nombre") or "").strip()
+    pin    = (data.get("pin") or "").strip()
+
+    if not nombre or not pin:
+        return jsonify({"ok": False, "error": "Selecciona tu nombre y escribe tu PIN"})
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""SELECT nombre, cargo, pin, activo FROM personal
+                     WHERE LOWER(TRIM(nombre)) = LOWER(TRIM(%s))""", (nombre,))
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            return jsonify({"ok": False, "error": "Esa persona no esta registrada"})
+        if row[3] != 1:
+            return jsonify({"ok": False, "error": "Esta persona ya no tiene acceso"})
+        if (row[2] or "") != pin:
+            return jsonify({"ok": False, "error": "PIN incorrecto"})
+
+        return jsonify({"ok": True, "nombre": row[0], "cargo": row[1] or ""})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/verificar_sesion", methods=["POST"])
+def verificar_sesion():
+    """Comprueba que la persona siga teniendo acceso."""
+    nombre = (request.json.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"ok": False})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""SELECT activo FROM personal
+                     WHERE LOWER(TRIM(nombre)) = LOWER(TRIM(%s))""", (nombre,))
+        row = c.fetchone()
+        conn.close()
+        return jsonify({"ok": bool(row) and row[0] == 1})
+    except Exception:
+        return jsonify({"ok": True})   # ante un fallo de red, no sacar a nadie
+
+
+@app.route("/personal")
+def listar_personal():
+    """Personas activas que pueden registrar movimientos."""
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT nombre, cargo FROM personal WHERE activo=1 ORDER BY nombre")
+        rows = c.fetchall()
+        conn.close()
+        return jsonify([{"nombre": r[0], "cargo": r[1] or ""} for r in rows])
+    except Exception:
+        return jsonify([])
+
+
+@app.route("/historial_flor")
+def historial_flor():
+    """Todos los movimientos de una flor, para investigar diferencias."""
+    flor = (request.args.get("flor") or "").strip()
+    if not flor:
+        return jsonify({"flor": "", "stock": None, "movimientos": []})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("""SELECT categoria, stock_ramos, stock_tallos
+                     FROM flores WHERE nombre=%s""", (flor,))
+        row = c.fetchone()
+        stock = ({"categoria": row[0], "ramos": row[1], "tallos": row[2]}
+                 if row else None)
+
+        c.execute("""SELECT id, fecha, tipo, cantidad_ramos, cantidad_tallos,
+                            origen, usuario, notas
+                     FROM movimientos WHERE flor_nombre=%s
+                     ORDER BY id DESC LIMIT 200""", (flor,))
+        movs = [{"id": r[0], "fecha": r[1], "tipo": r[2],
+                 "ramos": r[3] or 0, "tallos": r[4] or 0,
+                 "origen": r[5] or "", "usuario": r[6] or "",
+                 "notas": r[7] or ""} for r in c.fetchall()]
+        conn.close()
+        return jsonify({"flor": flor, "stock": stock, "movimientos": movs})
+    except Exception as e:
+        return jsonify({"flor": flor, "stock": None, "movimientos": [],
+                        "error": str(e)})
+
+
+@app.route("/ajuste", methods=["POST"])
+def ajuste():
+    """
+    Ajuste por conteo fisico: se indica cuanto hay realmente y el
+    sistema corrige el stock dejando el movimiento registrado.
+    """
+    data = request.json
+    flor    = (data.get("flor") or "").strip()
+    usuario = (data.get("usuario") or "").strip()
+    motivo  = (data.get("motivo") or "").strip()
+    if not flor:
+        return jsonify({"ok": False, "error": "Selecciona la flor"})
+    if not usuario:
+        return jsonify({"ok": False, "error": "Selecciona quien hace el ajuste"})
+
+    try:
+        ramos_reales  = int(data.get("ramos", 0))
+        tallos_reales = int(data.get("tallos", 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Cantidades invalidas"})
+
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("SELECT stock_ramos, stock_tallos FROM flores WHERE nombre=%s", (flor,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"ok": False, "error": "Esa flor no esta en el catalogo"})
+
+        ramos_ant, tallos_ant = row[0] or 0, row[1] or 0
+        dif_r = ramos_reales - ramos_ant
+        dif_t = tallos_reales - tallos_ant
+
+        if dif_r == 0 and dif_t == 0:
+            conn.close()
+            return jsonify({"ok": True, "sin_cambio": True,
+                            "mensaje": "El stock ya coincide, no se hizo ningun ajuste"})
+
+        c.execute("""UPDATE flores SET stock_ramos=%s, stock_tallos=%s
+                     WHERE nombre=%s""", (ramos_reales, tallos_reales, flor))
+
+        nota = (f"Ajuste por conteo fisico. Antes: {ramos_ant} ramos {tallos_ant} tallos. "
+                f"Ahora: {ramos_reales} ramos {tallos_reales} tallos."
+                + (f" Motivo: {motivo}" if motivo else ""))
+        c.execute("""INSERT INTO movimientos
+                        (fecha, flor_nombre, tipo, cantidad_ramos, cantidad_tallos,
+                         origen, usuario, notas)
+                     VALUES (%s,%s,'AJUSTE',%s,%s,'CONTEO_FISICO',%s,%s)""",
+                  (ahora().strftime("%Y-%m-%d %H:%M"), flor, dif_r, dif_t,
+                   usuario, nota))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "diferencia_ramos": dif_r,
+                        "diferencia_tallos": dif_t,
+                        "antes": {"ramos": ramos_ant, "tallos": tallos_ant}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/agregar_flor", methods=["POST"])
+def agregar_flor():
+    data = request.json
+    nombre = data.get("nombre", "").strip()
+    categoria = data.get("categoria", "Sin categoria").strip()
+    if not nombre:
+        return jsonify({"ok": False})
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        c.execute("INSERT INTO flores (nombre, categoria) VALUES (%s, %s) ON CONFLICT (nombre) DO NOTHING", (nombre, categoria))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+init_db()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
